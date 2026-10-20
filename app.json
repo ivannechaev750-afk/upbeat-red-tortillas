@@ -1,0 +1,40 @@
+{
+  "expo": {
+    "name": "upbeat-red-tortillas",
+    "slug": "snack-418069a1-cfe5-4d81-b58c-02844f1a9d4e",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": false,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "edgeToEdgeEnabled": true,
+      "package": "com.ivan43568756789.snack418069a1cfe54d81b58c02844f1a9d4e"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "fbe5984f-4d5e-4562-91e4-e748937ee15a"
+      }
+    },
+    "plugins": [
+      "expo-font",
+      "expo-asset",
+      "expo-audio"
+    ]
+  }
+}
