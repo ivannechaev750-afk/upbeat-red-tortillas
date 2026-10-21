@@ -1,7 +1,11 @@
-import React, { useState } from 'react';
-import { AudioProvider } from './src/services/AudioContext';
-import HomeScreen from './HomeScreen';
-import PlayerScreen from './PlayerScreen';
+// App.js
+import React, { useState, useEffect, useCallback } from 'react';
+import { BackHandler } from 'react-native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { AudioProvider, useAudio } from './src/services/AudioContext';
+
+import HomeScreen from './HomeScreen.js';
+import PlayerScreen from './PlayerScreen.js';
 import LibraryScreen from './LibraryScreen';
 import SettingsScreen from './SettingsScreen';
 import SearchScreen from './SearchScreen';
@@ -9,47 +13,83 @@ import QueueScreen from './QueueScreen';
 import AlbumDetailScreen from './AlbumDetailScreen';
 import ServerConnectScreen from './ServerConnectScreen';
 
-// Начальный трек по умолчанию
-const initialTrack = {
-  id: '1',
-  title: 'Sunset Vibes',
-  artist: 'Digital Horizon',
-  cover: 'https://picsum.photos/seed/sunset/600/600',
-  duration: '3:45',
-};
-
 function MainNavigator() {
   const [currentScreen, setCurrentScreen] = useState('home');
   const [previousScreen, setPreviousScreen] = useState('home');
   const [selectedAlbum, setSelectedAlbum] = useState(null);
 
-  // Глобальное состояние текущего воспроизведения
-  const [currentTrack, setCurrentTrack] = useState(initialTrack);
-  const [isPlaying, setIsPlaying] = useState(false);
+  // Берем реальное состояние и методы из глобального AudioContext
+  const {
+    currentTrack,
+    isPlaying,
+    togglePlay,
+    playTrack,
+    queue,
+  } = useAudio();
 
-  // Переход в полноэкранный плеер с сохранением предыдущего экрана
-  const openPlayer = (track = null) => {
-    if (track && track.title) {
-      setCurrentTrack(track);
-      setIsPlaying(true);
-    }
-    setPreviousScreen(currentScreen);
-    setCurrentScreen('player');
-  };
+  // Переход между основными экранами с запоминанием истории
+  const navigateTo = useCallback(
+    (targetScreen) => {
+      if (targetScreen !== currentScreen) {
+        setPreviousScreen(currentScreen);
+        setCurrentScreen(targetScreen);
+      }
+    },
+    [currentScreen]
+  );
 
-  // Закрытие плеера (возврат туда, откуда открыли)
-  const closePlayer = () => {
+  // Открытие полноэкранного плеера (при передаче нового трека — сразу запускаем его)
+  const openPlayer = useCallback(
+    (track = null) => {
+      if (track && track.uri && track.id !== currentTrack?.id) {
+        playTrack(track, queue);
+      }
+      if (currentScreen !== 'player') {
+        setPreviousScreen(currentScreen);
+        setCurrentScreen('player');
+      }
+    },
+    [currentScreen, currentTrack?.id, playTrack, queue]
+  );
+
+  const closePlayer = useCallback(() => {
     setCurrentScreen(previousScreen || 'home');
-  };
+  }, [previousScreen]);
 
-  const openAlbum = (albumData) => {
-    setSelectedAlbum(albumData);
-    setCurrentScreen('album_detail');
-  };
+  const openAlbum = useCallback(
+    (albumData) => {
+      setSelectedAlbum(albumData);
+      setPreviousScreen(currentScreen);
+      setCurrentScreen('album_detail');
+    },
+    [currentScreen]
+  );
 
-  const togglePlay = () => {
-    setIsPlaying((prev) => !prev);
-  };
+  // Поддержка аппаратной кнопки / жеста "Назад" на Android
+  useEffect(() => {
+    const onBackPress = () => {
+      if (currentScreen === 'queue') {
+        setCurrentScreen('player');
+        return true;
+      }
+      if (currentScreen === 'server_connect') {
+        setCurrentScreen('settings');
+        return true;
+      }
+      if (['player', 'album_detail', 'settings'].includes(currentScreen)) {
+        setCurrentScreen(previousScreen || 'home');
+        return true;
+      }
+      if (['library', 'search'].includes(currentScreen)) {
+        setCurrentScreen('home');
+        return true;
+      }
+      return false; // На главном экране позволяем свернуть приложение
+    };
+
+    const subscription = BackHandler.addEventListener('hardwareBackPress', onBackPress);
+    return () => subscription.remove();
+  }, [currentScreen, previousScreen]);
 
   // ЭКРАН 1: Полноэкранный плеер
   if (currentScreen === 'player') {
@@ -71,8 +111,7 @@ function MainNavigator() {
         currentTrack={currentTrack}
         onClose={() => setCurrentScreen('player')}
         onSelectTrack={(track) => {
-          setCurrentTrack(track);
-          setIsPlaying(true);
+          playTrack(track, queue);
         }}
       />
     );
@@ -120,8 +159,8 @@ function MainNavigator() {
         isPlaying={isPlaying}
         onTogglePlay={togglePlay}
         onOpenPlayer={openPlayer}
-        onGoHome={() => setCurrentScreen('home')}
-        onGoSearch={() => setCurrentScreen('search')}
+        onGoHome={() => navigateTo('home')}
+        onGoSearch={() => navigateTo('search')}
       />
     );
   }
@@ -134,8 +173,8 @@ function MainNavigator() {
         isPlaying={isPlaying}
         onTogglePlay={togglePlay}
         onOpenPlayer={openPlayer}
-        onGoHome={() => setCurrentScreen('home')}
-        onGoLibrary={() => setCurrentScreen('library')}
+        onGoHome={() => navigateTo('home')}
+        onGoLibrary={() => navigateTo('library')}
       />
     );
   }
@@ -147,9 +186,9 @@ function MainNavigator() {
       isPlaying={isPlaying}
       onTogglePlay={togglePlay}
       onOpenPlayer={openPlayer}
-      onOpenLibrary={() => setCurrentScreen('library')}
-      onOpenSettings={() => setCurrentScreen('settings')}
-      onOpenSearch={() => setCurrentScreen('search')}
+      onOpenLibrary={() => navigateTo('library')}
+      onOpenSettings={() => navigateTo('settings')}
+      onOpenSearch={() => navigateTo('search')}
       onOpenAlbum={openAlbum}
     />
   );
@@ -157,8 +196,10 @@ function MainNavigator() {
 
 export default function App() {
   return (
-    <AudioProvider>
-      <MainNavigator />
-    </AudioProvider>
+    <SafeAreaProvider>
+      <AudioProvider>
+        <MainNavigator />
+      </AudioProvider>
+    </SafeAreaProvider>
   );
 }

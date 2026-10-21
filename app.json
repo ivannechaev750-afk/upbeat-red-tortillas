@@ -1,27 +1,38 @@
 {
   "expo": {
-    "name": "upbeat-red-tortillas",
+    "name": "StreamPlayer",
     "slug": "snack-418069a1-cfe5-4d81-b58c-02844f1a9d4e",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
     "newArchEnabled": false,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#0E0E0E"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "UIBackgroundModes": ["audio"],
+        "NSAppleMusicUsageDescription": "Приложению необходим доступ к медиатеке для воспроизведения вашей локальной музыки."
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#0E0E0E"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.ivan43568756789.snack418069a1cfe54d81b58c02844f1a9d4e"
+      "package": "com.ivan43568756789.snack418069a1cfe54d81b58c02844f1a9d4e",
+      "permissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_AUDIO",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -34,7 +45,20 @@
     "plugins": [
       "expo-font",
       "expo-asset",
-      "expo-audio"
+      [
+        "expo-audio",
+        {
+          "microphonePermission": false
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Разрешите доступ к файлам для чтения обложек и музыки.",
+          "savePhotosPermission": "Разрешите сохранение обложек альбомов.",
+          "isAccessMediaLocationEnabled": true
+        }
+      ]
     ]
   }
 }

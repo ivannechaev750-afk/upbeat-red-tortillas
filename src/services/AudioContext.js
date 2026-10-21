@@ -1,190 +1,305 @@
-import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
-import { createAudioPlayer } from 'expo-audio';
-import * as DocumentPicker from 'expo-document-picker';
-import { StorageService } from '../services/storageService'; // Сервис хранения данных
+// src/services/AudioContext.js
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+} from 'react';
+import { StorageService } from './storageService';
+import {
+  pickLocalAudioFiles,
+  scanDeviceMusicLibrary,
+  requestAudioPermissions,
+  normalizeTrack,
+} from './fileService';
+import { audioEngine } from './audioService';
 
-const AudioContext = createContext(null);
+export const AudioContext = createContext(null);
 
 export const AudioProvider = ({ children }) => {
   const [currentTrack, setCurrentTrack] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [position, setPosition] = useState(0); // в секундах
-  const [duration, setDuration] = useState(0); // в секундах
-  const [queue, setQueue] = useState([]);
+  const [position, setPosition] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [queue, setQueueState] = useState([]);
   const [currentTrackIndex, setCurrentTrackIndex] = useState(-1);
 
-  // Ссылка на нативный инстанс плеера
-  const playerRef = useRef(null);
-  // Интервал для обновления текущего времени
-  const progressTimerRef = useRef(null);
+  // Состояния режимов плеера и разрешений
+  const [isShuffle, setIsShuffle] = useState(false);
+  const [repeatMode, setRepeatMode] = useState('off'); // 'off' | 'all' | 'one'
+  const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
+  const [permissionGranted, setPermissionGranted] = useState(false);
 
-  // Загрузка сохраненных треков при старте приложения
+  const queueRef = useRef([]);
+  const indexRef = useRef(-1);
+  const repeatRef = useRef('off');
+  const shuffleRef = useRef(false);
+  const progressTimerRef = useRef(null);
+  const isTransitioningRef = useRef(false);
+
+  const setQueue = useCallback((newQueue) => {
+    const normalized = Array.isArray(newQueue)
+      ? newQueue.map((t, idx) => normalizeTrack(t, idx))
+      : [];
+    queueRef.current = normalized;
+    setQueueState(normalized);
+  }, []);
+
   useEffect(() => {
+    repeatRef.current = repeatMode;
+  }, [repeatMode]);
+
+  useEffect(() => {
+    shuffleRef.current = isShuffle;
+  }, [isShuffle]);
+
+  // Загрузка сохраненных треков при запуске
+  useEffect(() => {
+    let mounted = true;
+
     (async () => {
-      const savedTracks = await StorageService.getTracks();
+      await audioEngine.setupPlayer();
+      const [savedTracks, lastSession] = await Promise.all([
+        StorageService.getTracks(),
+        StorageService.getLastSession(),
+      ]);
+
+      if (!mounted) return;
+
       if (savedTracks && savedTracks.length > 0) {
         setQueue(savedTracks);
-        // Загружаем первый трек в буфер без автозапуска
-        setCurrentTrack(savedTracks[0]);
-        setCurrentTrackIndex(0);
+
+        let startIdx = 0;
+        if (lastSession?.trackId) {
+          const foundIdx = savedTracks.findIndex((t) => t.id === lastSession.trackId);
+          if (foundIdx !== -1) startIdx = foundIdx;
+        }
+
+        setCurrentTrack(savedTracks[startIdx]);
+        setCurrentTrackIndex(startIdx);
+        indexRef.current = startIdx;
       }
     })();
 
     return () => {
+      mounted = false;
       stopProgressTimer();
-      if (playerRef.current) {
-        playerRef.current.release();
-      }
+      audioEngine.release();
     };
-  }, []);
+  }, [setQueue]);
 
-  const startProgressTimer = () => {
-    stopProgressTimer();
-    progressTimerRef.current = setInterval(() => {
-      if (playerRef.current) {
-        const curTime = playerRef.current.currentTime || 0;
-        const totalTime = playerRef.current.duration || 0;
-        setPosition(Math.floor(curTime));
-        setDuration(Math.floor(totalTime));
-
-        // Если трек доиграл до конца — переходим к следующему
-        if (totalTime > 0 && curTime >= totalTime) {
-          nextTrack();
-        }
-      }
-    }, 500);
-  };
-
-  const stopProgressTimer = () => {
+  const stopProgressTimer = useCallback(() => {
     if (progressTimerRef.current) {
       clearInterval(progressTimerRef.current);
       progressTimerRef.current = null;
     }
+  }, []);
+
+  const startProgressTimer = useCallback(() => {
+    stopProgressTimer();
+    progressTimerRef.current = setInterval(async () => {
+      const { position: curTime, duration: totalTime } = await audioEngine.getProgress();
+      const posSec = Math.floor(curTime);
+      const durSec = Math.floor(totalTime);
+
+      setPosition(posSec);
+      if (durSec > 0) setDuration(durSec);
+
+      if (durSec > 0 && curTime >= totalTime - 0.35 && !isTransitioningRef.current) {
+        isTransitioningRef.current = true;
+        handleTrackEnded();
+      }
+    }, 500);
+  }, [stopProgressTimer]);
+
+  const handleTrackEnded = async () => {
+    const activeQueue = queueRef.current;
+    const curIdx = indexRef.current;
+
+    if (activeQueue.length === 0) {
+      isTransitioningRef.current = false;
+      return;
+    }
+
+    if (repeatRef.current === 'one') {
+      await audioEngine.seekTo(0);
+      await audioEngine.play();
+      setPosition(0);
+      isTransitioningRef.current = false;
+      return;
+    }
+
+    let nextIdx;
+    if (shuffleRef.current && activeQueue.length > 1) {
+      do {
+        nextIdx = Math.floor(Math.random() * activeQueue.length);
+      } while (nextIdx === curIdx);
+    } else {
+      nextIdx = curIdx + 1;
+    }
+
+    if (nextIdx >= activeQueue.length) {
+      if (repeatRef.current === 'all') {
+        nextIdx = 0;
+      } else {
+        setIsPlaying(false);
+        stopProgressTimer();
+        isTransitioningRef.current = false;
+        return;
+      }
+    }
+
+    await playTrack(activeQueue[nextIdx]);
+    isTransitioningRef.current = false;
   };
 
   // 1. Воспроизведение конкретного трека
-  const playTrack = async (track, newQueue = null) => {
-    try {
-      if (!track || !track.uri) return;
+  const playTrack = useCallback(
+    async (track, newQueue = null) => {
+      try {
+        if (!track) return;
+        const normalizedTrack = normalizeTrack(track);
+        if (!normalizedTrack.uri) return;
 
-      if (newQueue) {
-        setQueue(newQueue);
-        const idx = newQueue.findIndex((t) => t.id === track.id);
-        setCurrentTrackIndex(idx !== -1 ? idx : 0);
-      } else {
-        const idx = queue.findIndex((t) => t.id === track.id);
-        if (idx !== -1) setCurrentTrackIndex(idx);
+        let activeList = queueRef.current;
+        if (Array.isArray(newQueue) && newQueue.length > 0) {
+          setQueue(newQueue);
+          activeList = queueRef.current;
+        }
+
+        const idx = activeList.findIndex((t) => t.id === normalizedTrack.id);
+        const resolvedIdx = idx !== -1 ? idx : 0;
+
+        setCurrentTrackIndex(resolvedIdx);
+        indexRef.current = resolvedIdx;
+        setCurrentTrack(normalizedTrack);
+        setPosition(0);
+        setDuration(normalizedTrack.durationSec || 0);
+
+        const started = await audioEngine.loadAndPlay(normalizedTrack);
+        if (started) {
+          setIsPlaying(true);
+          startProgressTimer();
+        }
+
+        StorageService.saveLastSession(normalizedTrack.id, 0);
+      } catch (error) {
+        console.error('Ошибка воспроизведения файла:', error);
       }
-
-      setCurrentTrack(track);
-
-      // Очистка старого плеера
-      if (playerRef.current) {
-        playerRef.current.pause();
-        playerRef.current.release();
-      }
-
-      // Инициализация аудиопотока
-      const player = createAudioPlayer({ uri: track.uri });
-      playerRef.current = player;
-
-      player.play();
-      setIsPlaying(true);
-      startProgressTimer();
-
-      // Сохраняем состояние последней сессии
-      StorageService.saveLastSession(track.id, 0);
-    } catch (error) {
-      console.error('Ошибка воспроизведения аудио:', error);
-    }
-  };
+    },
+    [setQueue, startProgressTimer]
+  );
 
   // 2. Пауза / Возобновление
-  const togglePlay = () => {
-    if (!playerRef.current) {
-      if (currentTrack) {
-        playTrack(currentTrack);
+  const togglePlay = useCallback(async () => {
+    if (!currentTrack) {
+      if (queueRef.current.length > 0) {
+        await playTrack(queueRef.current[0]);
       }
       return;
     }
 
     if (isPlaying) {
-      playerRef.current.pause();
+      await audioEngine.pause();
       setIsPlaying(false);
       stopProgressTimer();
+      StorageService.saveLastSession(currentTrack.id, position);
     } else {
-      playerRef.current.play();
-      setIsPlaying(true);
-      startProgressTimer();
+      const { duration: d } = await audioEngine.getProgress();
+      if (!d || d === 0) {
+        await playTrack(currentTrack);
+      } else {
+        await audioEngine.play();
+        setIsPlaying(true);
+        startProgressTimer();
+      }
     }
-  };
+  }, [currentTrack, isPlaying, playTrack, position, startProgressTimer, stopProgressTimer]);
 
   // 3. Перемотка
-  const seek = (seconds) => {
-    if (playerRef.current) {
-      playerRef.current.seekTo(seconds);
-      setPosition(seconds);
-    }
-  };
+  const seek = useCallback(async (seconds) => {
+    const target = Math.max(0, Math.floor(seconds));
+    await audioEngine.seekTo(target);
+    setPosition(target);
+  }, []);
 
   // 4. Следующий трек
-  const nextTrack = () => {
-    if (queue.length === 0) return;
-    const nextIdx = (currentTrackIndex + 1) % queue.length;
-    playTrack(queue[nextIdx]);
-  };
+  const nextTrack = useCallback(() => {
+    const activeQueue = queueRef.current;
+    if (activeQueue.length === 0) return;
+
+    let nextIdx;
+    if (shuffleRef.current && activeQueue.length > 1) {
+      nextIdx = Math.floor(Math.random() * activeQueue.length);
+    } else {
+      nextIdx = (indexRef.current + 1) % activeQueue.length;
+    }
+    playTrack(activeQueue[nextIdx]);
+  }, [playTrack]);
 
   // 5. Предыдущий трек
-  const prevTrack = () => {
-    if (queue.length === 0) return;
-    // Если трек играет дольше 3 секунд, сначала скидываем в начало
+  const prevTrack = useCallback(() => {
+    const activeQueue = queueRef.current;
+    if (activeQueue.length === 0) return;
+
     if (position > 3) {
       seek(0);
       return;
     }
-    const prevIdx = (currentTrackIndex - 1 + queue.length) % queue.length;
-    playTrack(queue[prevIdx]);
-  };
+    const prevIdx = (indexRef.current - 1 + activeQueue.length) % activeQueue.length;
+    playTrack(activeQueue[prevIdx]);
+  }, [playTrack, position, seek]);
 
-  // 6. Импорт файлов из памяти устройства через DocumentPicker
-  const importLocalTracks = async () => {
-    try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: ['audio/*'],
-        copyToCacheDirectory: true,
-        multiple: true,
-      });
+  // 6. Запрос разрешения на чтение памяти устройства
+  const askMediaPermission = useCallback(async () => {
+    const res = await requestAudioPermissions();
+    setPermissionGranted(res.granted);
+    return res;
+  }, []);
 
-      if (result.canceled || !result.assets || result.assets.length === 0) {
-        return [];
+  // 7. Выбор аудиофайлов через системный проводник
+  const importLocalTracks = useCallback(
+    async (onProgress) => {
+      const imported = await pickLocalAudioFiles(onProgress);
+      if (!imported || imported.length === 0) return [];
+
+      const merged = await StorageService.upsertTracks(imported);
+      setQueue(merged);
+
+      // Если до импорта ничего не было выбрано — ставим первый трек готовым к запуску
+      if (!currentTrack && merged.length > 0) {
+        setCurrentTrack(merged[0]);
+        setCurrentTrackIndex(0);
+        indexRef.current = 0;
       }
 
-      const imported = result.assets.map((asset, index) => {
-        const rawName = asset.name || 'Аудиозапись';
-        const cleanTitle = rawName.replace(/\.[^/.]+$/, '');
-
-        return {
-          id: `local_${Date.now()}_${index}`,
-          title: cleanTitle,
-          artist: 'Память телефона',
-          uri: asset.uri, // file:///...
-          cover: 'https://picsum.photos/seed/' + encodeURIComponent(cleanTitle) + '/200/200',
-          durationSec: 0,
-          isLocal: true,
-          liked: false,
-        };
-      });
-
-      const updatedQueue = [...imported, ...queue];
-      setQueue(updatedQueue);
-      await StorageService.saveTracks(updatedQueue);
-
       return imported;
-    } catch (error) {
-      console.error('Ошибка выбора файлов:', error);
-      return [];
-    }
-  };
+    },
+    [currentTrack, setQueue]
+  );
+
+  // 8. Полное сканирование памяти телефона с запросом разрешения
+  const scanPhoneMusic = useCallback(
+    async (onProgress) => {
+      const scanned = await scanDeviceMusicLibrary(onProgress);
+      setPermissionGranted(true);
+      if (!scanned || scanned.length === 0) return [];
+
+      const merged = await StorageService.upsertTracks(scanned);
+      setQueue(merged);
+
+      if (!currentTrack && merged.length > 0) {
+        setCurrentTrack(merged[0]);
+        setCurrentTrackIndex(0);
+        indexRef.current = 0;
+      }
+
+      return scanned;
+    },
+    [currentTrack, setQueue]
+  );
 
   return (
     <AudioContext.Provider
@@ -194,12 +309,21 @@ export const AudioProvider = ({ children }) => {
         position,
         duration,
         queue,
+        isShuffle,
+        repeatMode,
+        playbackSpeed,
+        permissionGranted,
+        setIsShuffle,
+        setRepeatMode,
+        setPlaybackSpeed,
         playTrack,
         togglePlay,
         seek,
         nextTrack,
         prevTrack,
+        askMediaPermission,
         importLocalTracks,
+        scanPhoneMusic,
         setQueue,
       }}
     >

@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+// ImportModal.js
+import React, { useState, useEffect } from 'react';
 import {
   StyleSheet,
   Text,
@@ -8,42 +9,106 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { Ionicons, Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import {
+  requestAudioPermissions,
+  scanDeviceMusicLibrary,
+  pickLocalAudioFiles,
+  openAppSettings,
+} from './src/services/fileService';
 
 export default function ImportModal({ visible, onClose, onImportSuccess }) {
   const [isLoading, setIsLoading] = useState(false);
+  const [progressText, setProgressText] = useState('');
+  const [permissionState, setPermissionState] = useState({
+    granted: false,
+    canAskAgain: true,
+    checked: false,
+  });
+  const [statusMessage, setStatusMessage] = useState(null);
 
-  const handlePickFiles = () => {
+  // При открытии модалки проверяем статус разрешения
+  useEffect(() => {
+    if (visible) {
+      setStatusMessage(null);
+      setProgressText('');
+    }
+  }, [visible]);
+
+  const onProgress = (current, total) => {
+    setProgressText(`Чтение тегов и обложек: ${current} из ${total}`);
+  };
+
+  // Вариант 1: Автосканирование всей музыки на телефоне (с запросом разрешения)
+  const handleScanDevice = async () => {
+    setStatusMessage(null);
     setIsLoading(true);
+    setProgressText('Запрос разрешения на доступ к файлам...');
 
-    // Симуляция сканирования памяти устройства (стабильно работает в Snack)
-    setTimeout(() => {
-      const importedTracks = [
-        {
-          id: 'local_' + Date.now() + '_1',
-          title: 'Subwoofer Lullaby',
-          artist: 'Память устройства',
-          cover: 'https://picsum.photos/seed/phone1/150/150',
-          liked: false,
-          format: 'FLAC',
-          isLocal: true,
-        },
-        {
-          id: 'local_' + Date.now() + '_2',
-          title: 'Cyber City Audio',
-          artist: 'Память устройства',
-          cover: 'https://picsum.photos/seed/phone2/150/150',
-          liked: false,
-          format: 'MP3',
-          isLocal: true,
-        },
-      ];
+    try {
+      const perm = await requestAudioPermissions();
+      setPermissionState({
+        granted: perm.granted,
+        canAskAgain: perm.canAskAgain,
+        checked: true,
+      });
+
+      if (!perm.granted) {
+        setIsLoading(false);
+        setStatusMessage({
+          type: 'error',
+          text: perm.canAskAgain
+            ? 'Для поиска музыки необходимо разрешить доступ к аудиофайлам.'
+            : 'Доступ к файлам запрещён в настройках телефона. Разрешите доступ к «Музыке и аудио» вручную.',
+        });
+        return;
+      }
+
+      setProgressText('Поиск аудиофайлов в памяти телефона...');
+      const tracks = await scanDeviceMusicLibrary(onProgress);
 
       setIsLoading(false);
-      if (onImportSuccess) {
-        onImportSuccess(importedTracks);
+      if (!tracks || tracks.length === 0) {
+        setStatusMessage({
+          type: 'info',
+          text: 'В стандартных папках музыка не найдена. Попробуйте выбрать файлы вручную через проводник.',
+        });
+        return;
       }
+
+      onImportSuccess?.(tracks);
       onClose();
-    }, 1000);
+    } catch (err) {
+      setIsLoading(false);
+      setStatusMessage({
+        type: 'error',
+        text: 'Не удалось просканировать память. Попробуйте выбрать файлы через проводник.',
+      });
+    }
+  };
+
+  // Вариант 2: Выбор конкретных файлов через системный проводник (DocumentPicker)
+  const handlePickFromExplorer = async () => {
+    setStatusMessage(null);
+    setIsLoading(true);
+    setProgressText('Открытие проводника...');
+
+    try {
+      const tracks = await pickLocalAudioFiles(onProgress);
+      setIsLoading(false);
+
+      if (!tracks || tracks.length === 0) {
+        return; // Пользователь просто закрыл проводник
+      }
+
+      onImportSuccess?.(tracks);
+      onClose();
+    } catch (err) {
+      setIsLoading(false);
+      setStatusMessage({
+        type: 'error',
+        text: 'Ошибка чтения выбранных файлов.',
+      });
+    }
   };
 
   return (
@@ -55,7 +120,7 @@ export default function ImportModal({ visible, onClose, onImportSuccess }) {
     >
       <View style={styles.modalOverlay}>
         <View style={styles.modalCard}>
-          <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
+          <TouchableOpacity onPress={onClose} style={styles.closeBtn} disabled={isLoading}>
             <Ionicons name="close" size={22} color="#8E8E93" />
           </TouchableOpacity>
 
@@ -63,33 +128,73 @@ export default function ImportModal({ visible, onClose, onImportSuccess }) {
             <MaterialCommunityIcons name="folder-music-outline" size={38} color="#fc3f1d" />
           </View>
 
-          <Text style={styles.modalTitle}>Импорт музыки</Text>
+          <Text style={styles.modalTitle}>Импорт своей музыки</Text>
           <Text style={styles.modalSubtitle}>
-            Выберите аудиофайлы из памяти вашего телефона или SD-карты
+            Разрешите доступ к памяти устройства для автоматического поиска песен или выберите аудиофайлы через проводник
           </Text>
 
+          {/* Поддерживаемые форматы */}
           <View style={styles.badgeRow}>
-            <View style={styles.formatBadge}><Text style={styles.badgeText}>.MP3</Text></View>
-            <View style={styles.formatBadge}><Text style={styles.badgeText}>.FLAC</Text></View>
-            <View style={styles.formatBadge}><Text style={styles.badgeText}>.WAV</Text></View>
-            <View style={styles.formatBadge}><Text style={styles.badgeText}>.M4A</Text></View>
+            {['.MP3', '.FLAC', '.WAV', '.M4A', '.AAC'].map((ext) => (
+              <View key={ext} style={styles.formatBadge}>
+                <Text style={styles.badgeText}>{ext}</Text>
+              </View>
+            ))}
           </View>
 
-          <TouchableOpacity
-            style={styles.pickButton}
-            onPress={handlePickFiles}
-            disabled={isLoading}
-            activeOpacity={0.8}
-          >
-            {isLoading ? (
-              <ActivityIndicator color="#FFFFFF" />
-            ) : (
-              <View style={styles.btnInner}>
-                <Feather name="folder" size={18} color="#FFFFFF" />
-                <Text style={styles.pickButtonText}>Открыть проводник</Text>
+          {/* Уведомление о статусе разрешения или ошибки */}
+          {statusMessage && (
+            <View
+              style={[
+                styles.alertBox,
+                statusMessage.type === 'error' ? styles.alertError : styles.alertInfo,
+              ]}
+            >
+              <Ionicons
+                name={statusMessage.type === 'error' ? 'lock-closed-outline' : 'information-circle-outline'}
+                size={18}
+                color={statusMessage.type === 'error' ? '#fc3f1d' : '#64B5F6'}
+              />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.alertText}>{statusMessage.text}</Text>
+                {!permissionState.canAskAgain && statusMessage.type === 'error' && (
+                  <TouchableOpacity onPress={openAppSettings} style={styles.settingsLinkBtn}>
+                    <Text style={styles.settingsLinkText}>Открыть настройки разрешений →</Text>
+                  </TouchableOpacity>
+                )}
               </View>
-            )}
-          </TouchableOpacity>
+            </View>
+          )}
+
+          {/* Индикатор загрузки и прогресса */}
+          {isLoading ? (
+            <View style={styles.loadingBlock}>
+              <ActivityIndicator size="large" color="#fc3f1d" />
+              <Text style={styles.progressLabel}>{progressText}</Text>
+            </View>
+          ) : (
+            <>
+              {/* Кнопка 1: Сканировать память (с запросом разрешения ОС) */}
+              <TouchableOpacity
+                style={styles.primaryButton}
+                onPress={handleScanDevice}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="shield-checkmark-outline" size={18} color="#FFFFFF" />
+                <Text style={styles.primaryButtonText}>Разрешить и найти всю музыку</Text>
+              </TouchableOpacity>
+
+              {/* Кнопка 2: Открыть системный проводник */}
+              <TouchableOpacity
+                style={styles.secondaryButton}
+                onPress={handlePickFromExplorer}
+                activeOpacity={0.8}
+              >
+                <Feather name="folder" size={18} color="#FFFFFF" />
+                <Text style={styles.secondaryButtonText}>Выбрать файлы в проводнике</Text>
+              </TouchableOpacity>
+            </>
+          )}
 
           <TouchableOpacity style={styles.cancelBtn} onPress={onClose} disabled={isLoading}>
             <Text style={styles.cancelBtnText}>Отмена</Text>
@@ -103,16 +208,16 @@ export default function ImportModal({ visible, onClose, onImportSuccess }) {
 const styles = StyleSheet.create({
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.75)',
+    backgroundColor: 'rgba(0, 0, 0, 0.78)',
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 24,
+    paddingHorizontal: 22,
   },
   modalCard: {
     width: '100%',
-    maxWidth: 360,
+    maxWidth: 370,
     backgroundColor: '#1C1C1E',
-    borderRadius: 20,
+    borderRadius: 22,
     padding: 24,
     alignItems: 'center',
     borderWidth: 1,
@@ -132,7 +237,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#2A1F21',
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: 14,
   },
   modalTitle: {
     fontSize: 20,
@@ -149,8 +254,8 @@ const styles = StyleSheet.create({
   },
   badgeRow: {
     flexDirection: 'row',
-    gap: 8,
-    marginBottom: 24,
+    gap: 6,
+    marginBottom: 20,
   },
   formatBadge: {
     backgroundColor: '#262628',
@@ -163,27 +268,84 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#B3B3B3',
   },
-  pickButton: {
+  alertBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    padding: 12,
+    borderRadius: 12,
+    width: '100%',
+    marginBottom: 16,
+  },
+  alertError: {
+    backgroundColor: 'rgba(252, 63, 29, 0.12)',
+    borderWidth: 1,
+    borderColor: '#fc3f1d',
+  },
+  alertInfo: {
+    backgroundColor: 'rgba(100, 181, 246, 0.12)',
+    borderWidth: 1,
+    borderColor: '#64B5F6',
+  },
+  alertText: {
+    color: '#EAEAEA',
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  settingsLinkBtn: {
+    marginTop: 6,
+  },
+  settingsLinkText: {
+    color: '#fc3f1d',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  loadingBlock: {
+    paddingVertical: 20,
+    alignItems: 'center',
+    gap: 12,
+  },
+  progressLabel: {
+    color: '#CCCCCC',
+    fontSize: 13,
+    textAlign: 'center',
+  },
+  primaryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
     backgroundColor: '#fc3f1d',
     width: '100%',
     paddingVertical: 14,
     borderRadius: 12,
     marginBottom: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
-  btnInner: {
+  primaryButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  secondaryButton: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 8,
+    backgroundColor: '#2A2A2D',
+    width: '100%',
+    paddingVertical: 13,
+    borderRadius: 12,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#3A3A3C',
   },
-  pickButtonText: {
+  secondaryButtonText: {
     color: '#FFFFFF',
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '600',
   },
   cancelBtn: {
-    paddingVertical: 8,
+    paddingVertical: 6,
   },
   cancelBtnText: {
     color: '#8E8E93',
